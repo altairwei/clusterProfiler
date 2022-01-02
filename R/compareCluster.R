@@ -4,7 +4,8 @@
 ##' cluster.
 ##'
 ##'
-##' @param geneClusters a list of entrez gene id. Alternatively, a formula of type Entrez~group
+##' @param geneClusters a list of entrez gene id. Alternatively, a formula of type \code{Entrez~group}
+##' or a formula of type \code{Entrez | logFC ~ group} for "gseGO", "gseKEGG" and "GSEA".
 ##' @param fun One of "groupGO", "enrichGO", "enrichKEGG", "enrichDO" or "enrichPathway" .
 ##' @param data if geneClusters is a formula, the data from which the clusters must be extracted.
 ##' @param ...  Other arguments.
@@ -28,10 +29,12 @@
 ##'                      organism="hsa", pvalueCutoff=0.05)
 ##' as.data.frame(xx)
 ##' # plot(xx, type="dot", caption="KEGG Enrichment Comparison")
+##' dotplot(xx)
 ##'
 ##' ## formula interface
 ##' mydf <- data.frame(Entrez=c('1', '100', '1000', '100101467',
 ##'                             '100127206', '100128071'),
+##'                    logFC = c(1.1, -0.5, 5, 2.5, -3, 3),
 ##'                    group = c('A', 'A', 'A', 'B', 'B', 'B'),
 ##'                    othergroup = c('good', 'good', 'bad', 'bad', 'good', 'bad'))
 ##' xx.formula <- compareCluster(Entrez~group, data=mydf,
@@ -42,15 +45,72 @@
 ##' xx.formula.twogroups <- compareCluster(Entrez~group+othergroup, data=mydf,
 ##'                                        fun='groupGO', OrgDb='org.Hs.eg.db')
 ##' as.data.frame(xx.formula.twogroups)
+##'
+##' ## formula interface for GSEA algorithm
+##' require(breastCancerMAINZ)
+##' data(mainz)
+##' require(stringr)
+##' require("hgu133a.db")
+##' require(plyr)
+##' clmainz=pData(mainz)$grade
+##' dd <- exprs(mainz)
+##' g1 <- dd[,clmainz == 1]
+##' g2 <- dd[,clmainz == 2]
+##' g3 <- dd[,clmainz == 3]
+##' 
+##' buildGenelist <- function(mat1, mat2) {
+##'     geneList <- exp(rowMeans(mat1))/exp(rowMeans(mat2))
+##'     geneList <- sort(geneList, decreasing=TRUE)
+##'     geneList <- log(geneList, base=2)
+##'     
+##'     eg <- mget(names(geneList), hgu133aENTREZID, ifnotfound=NA)   
+##'     gg <- data.frame(probe=names(geneList), val = geneList)
+##'     eg.df <- data.frame(probe=names(eg), eg=unlist(eg))
+##'     
+##'     xx <- merge(gg, eg.df, by.x="probe", by.y="probe")
+##'     xx <- xx[,-1]
+##'     xx <- unique(xx)
+##'     xx <- xx[!is.na(xx[,2]),]
+##'     yy <- ddply(xx, .(eg), function(x) data.frame(val=mean(x$val)))
+##'     
+##'     geneList <- yy$val
+##'     names(geneList) <- yy$eg
+##'     geneList <- sort(geneList, decreasing=TRUE)
+##' }
+##' 
+##' geneList21 <- buildGenelist(g2, g1)
+##' geneList31 <- buildGenelist(g3, g1)
+##' geneList32 <- buildGenelist(g3, g2)
+##' 
+##' mydf2 <- data.frame(Entrez = c(names(geneList21), names(geneList31), names(geneList32)),
+##'                     logFC = c(geneList21, geneList31, geneList32),
+##'                     group = c(rep("grade2_1", length(geneList21)), 
+##'                               rep("grade3_1", length(geneList31)), 
+##'                               rep("grade3_2", length(geneList32))))
+##' ## formula interface for gseGO
+##' gsea.formula <- compareCluster(Entrez|logFC~group, data=mydf2,
+##'                                fun='gseGO', OrgDb='org.Hs.eg.db',
+##'                                eps = 0)
+##' dotplot(gsea.formula)
+##'                                  
+##' ##  formula interface for gseKEGG                               
+##' gsea.formula2 <- compareCluster(Entrez|logFC~group, data=mydf2,
+##'                                 fun='gseKEGG', eps = 0)   
+##' dotplot(gsea.formula2)
+##' 
+##' ## formula interface for GSEA
+##' library(org.Hs.eg.db)
+##' kegg_clu <- download_KEGG("hsa", keggType="KEGG")
+##' TERM2GENE <- kegg_clu$KEGGPATHID2EXTID
+##' TERM2NAME <- kegg_clu$KEGGPATHID2NAME
+##'                                        
+##' gsea.formula3 <- compareCluster(Entrez|logFC~group, data=mydf2,
+##'                                 fun='GSEA', TERM2GENE = TERM2GENE, 
+##'                                 TERM2NAME = TERM2NAME, eps = 0)    
+##' dotplot(gsea.formula3)  
+##' 
 ##' }
 compareCluster <- function(geneClusters, fun="enrichGO", data='', ...) {
-    fun.name <- fun
-    if (is.function(fun)) {
-        fun.name <- deparse(substitute(fun))
-        fun.name.ns <- strsplit(fun.name, "::")[[1]]
-        if (length(fun.name.ns) > 1)
-            fun.name <- fun.name.ns[2]
-    }
 
     if (is.character(fun)) {
         fun <- eval(parse(text=fun))
@@ -61,14 +121,19 @@ compareCluster <- function(geneClusters, fun="enrichGO", data='', ...) {
         if (!is.data.frame(data)) {
             stop ('no data provided with formula for compareCluster')
         } else {
-            genes.var       = all.vars(geneClusters)[1]
+            genes.var = all.vars(geneClusters)[1]
+            n.var = length(all.vars(geneClusters))
             grouping.formula = gsub('^.*~', '~', as.character(as.expression(geneClusters)))   # For formulas like x~y+z
+            n.group.var = length(all.vars(formula(grouping.formula)))
             geneClusters = dlply(.data=data, formula(grouping.formula), .fun=function(x) {
-                if (fun.name == "gseGO") {
-                    fc.var = all.vars(geneClusters)[2]
-                    structure(x[[fc.var]], names = x[[genes.var]])
-                } else {
+                if ( (n.var - n.group.var) == 1 ) {
                     as.character(x[[genes.var]])
+                } else if ( (n.var - n.group.var) == 2 ) {
+                    fc.var = all.vars(geneClusters)[2]
+                    geneList = structure(x[[fc.var]], names = x[[genes.var]])
+                    sort(geneList, decreasing=TRUE)
+                } else {
+                    stop('only Entrez~group or Entrez|logFC~group type formula is supported')
                 }
             })
         }
